@@ -103,9 +103,26 @@ plugins = [
 disallow_untyped_defs = true
 exclude = ["tests"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--strict-markers",
+    "--tb=short",
+]
+markers = [
+    "unit: Unit tests",
+    "integration: Integration tests",
+]
+
 [dependency-groups]
 dev = [
     "ruff>=0.14.6",
     "mypy>=1.18.2",
     "types-requests>=2.32.4.20250913",
+    "pytest>=8.0.0",
+    "pytest-mock>=3.12.0",
 ]

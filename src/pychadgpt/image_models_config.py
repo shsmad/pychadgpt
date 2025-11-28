@@ -1,6 +1,6 @@
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class GenericParams(BaseModel): ...
@@ -58,9 +58,21 @@ class SeedreamParams(GenericParams):
 class SeededitParams(GenericParams):
     seed: Annotated[int, Field(ge=0, le=4000000)]
     guidance_scale: Annotated[float, Field(ge=1.0, le=10.0)]
-    image_url: str
-    image_base64: str
+    image_url: Optional[str] = None
+    image_base64: Optional[str] = None
     # "For 'seededit-3', you must provide either 'image_url' or 'image_base64', but not both."
+
+    @model_validator(mode="after")
+    def validate_image_source(self) -> "SeededitParams":
+        """Валидация: должно быть предоставлено ровно одно из полей image_url или image_base64."""
+        has_url = bool(self.image_url and self.image_url.strip())
+        has_base64 = bool(self.image_base64 and self.image_base64.strip())
+
+        if not has_url and not has_base64:
+            raise ValueError("For 'seededit-3', you must provide either 'image_url' or 'image_base64'")
+        if has_url and has_base64:
+            raise ValueError("For 'seededit-3', you must provide either 'image_url' or 'image_base64', but not both.")
+        return self
 
 
 MODEL_VALIDATORS: dict[str, type] = {

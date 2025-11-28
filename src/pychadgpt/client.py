@@ -2,9 +2,12 @@ import json
 import warnings
 
 from collections.abc import Mapping
+from enum import Enum
 from typing import Any, Required, TypedDict, TypeVar, cast
 
 import requests
+
+from requests import Response, Session
 
 from pychadgpt.image_models_config import MODEL_VALIDATORS
 
@@ -86,6 +89,28 @@ class CheckResponse(TypedDict, total=False):
     error_message: str
 
 
+class HTTPMethod(str, Enum):
+    """Поддерживаемые HTTP методы для запросов к API."""
+
+    GET = "get"
+    POST = "post"
+
+
+# Константы для валидации и обработки
+MAX_PROMPT_LENGTH = 1000
+DEFAULT_TIMEOUT_SECONDS = 30
+
+# Коды ошибок клиента
+class ErrorCodes:
+    """Коды ошибок клиента."""
+
+    HTTP_ERROR_NO_JSON = "CLI-001"
+    CONNECTION_ERROR = "CLI-002"
+    TIMEOUT_ERROR = "CLI-003"
+    REQUEST_ERROR = "CLI-004"
+    JSON_DECODE_ERROR = "CLI-005"
+
+
 class ChadGPTBaseClient:
     BASE_URL = "https://ask.chadgpt.ru/api/public/"
 
@@ -96,9 +121,20 @@ class ChadGPTBaseClient:
         Args:
             api_key (str): Ваш персональный API-ключ.
         """
-        if not api_key:
+        if not api_key or not api_key.strip():
             raise ValueError("API key не может быть пустым.")
         self.api_key = api_key
+        self._session = Session()
+
+    def close(self) -> None:
+        """Закрывает HTTP-сессию и освобождает соединения."""
+        self._session.close()
+
+    def __enter__(self) -> "ChadGPTBaseClient":
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.close()
 
     def _send_request(
         self,
@@ -108,41 +144,73 @@ class ChadGPTBaseClient:
         headers: dict[str, Any] | None = None,
         timeout: int | None = None,
         payload: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
     ) -> TResponse:
+        method_normalized = method.lower()
         try:
-            response = getattr(requests, method)(url=url, headers=headers, json=payload, timeout=timeout)
+            http_method = HTTPMethod(method_normalized)
+        except ValueError:
+            allowed_methods = ", ".join(sorted(m.value for m in HTTPMethod))
+            raise ValueError(f"Unsupported HTTP method '{method}'. Allowed: {allowed_methods}") from None
+
+        merged_headers = {"Content-Type": "application/json"}
+        if headers:
+            merged_headers.update(headers)
+
+        request_timeout = timeout if timeout is not None else DEFAULT_TIMEOUT_SECONDS
+        response: Response | None = None
+
+        try:
+            request_kwargs: dict[str, Any] = {
+                "url": url,
+                "headers": merged_headers,
+                "timeout": request_timeout,
+            }
+            if params:
+                request_kwargs["params"] = params
+            if payload is not None and http_method == HTTPMethod.POST:
+                request_kwargs["json"] = payload
+            elif payload is not None and http_method == HTTPMethod.GET:
+                # Для GET запросов переносим тело в query string, чтобы не нарушать HTTP-стандарты.
+                request_kwargs["params"] = {**params} if params else {}
+                request_kwargs["params"].update(payload)
+
+            response = self._session.request(method=http_method.value, **request_kwargs)
             response.raise_for_status()  # Вызовет HTTPError для статусов 4xx/5xx
             return cast(TResponse, response.json())
         except requests.exceptions.HTTPError as http_err:
             # Попытка парсинга ошибки из ответа API, даже если это HTTP-ошибка
             try:
-                return cast(TResponse, response.json())  # type: ignore
+                if response is not None:
+                    return cast(TResponse, response.json())
+                raise
             except json.JSONDecodeError:
                 return {
                     "is_success": False,
-                    "error_code": "CLI-001",
+                    "error_code": ErrorCodes.HTTP_ERROR_NO_JSON,
                     "error_message": f"HTTP-ошибка, но не удалось разобрать JSON: {http_err}. "
-                    f"Текст ответа: {response.text}",  # type: ignore
+                    f"Текст ответа: {response.text if response is not None else 'N/A'}",
                 }  # type: ignore
         except requests.exceptions.ConnectionError as conn_err:
-            return {"is_success": False, "error_code": "CLI-002", "error_message": f"Ошибка соединения: {conn_err}"}  # type: ignore
+            return {"is_success": False, "error_code": ErrorCodes.CONNECTION_ERROR, "error_message": f"Ошибка соединения: {conn_err}"}  # type: ignore
         except requests.exceptions.Timeout as timeout_err:
             return {
                 "is_success": False,
-                "error_code": "CLI-003",
+                "error_code": ErrorCodes.TIMEOUT_ERROR,
                 "error_message": f"Превышено время ожидания запроса: {timeout_err}",
             }  # type: ignore
         except requests.exceptions.RequestException as req_err:
             return {
                 "is_success": False,
-                "error_code": "CLI-004",
+                "error_code": ErrorCodes.REQUEST_ERROR,
                 "error_message": f"Непредвиденная ошибка запроса: {req_err}",
             }  # type: ignore
         except json.JSONDecodeError as json_err:
             return {
                 "is_success": False,
-                "error_code": "CLI-005",
-                "error_message": f"Не удалось декодировать JSON ответ: {json_err}. Текст ответа: {response.text}",  # type: ignore
+                "error_code": ErrorCodes.JSON_DECODE_ERROR,
+                "error_message": f"Не удалось декодировать JSON ответ: {json_err}. "
+                f"Текст ответа: {response.text if response is not None else 'N/A'}",
             }  # type: ignore
 
     def get_stat_info(self, timeout: int | None = None) -> WordsResponse:
@@ -155,11 +223,7 @@ class ChadGPTBaseClient:
         payload: dict[str, Any] = {
             "api_key": self.api_key,
         }
-        headers = {"Content-Type": "application/json"}
-
-        return self._send_request(
-            response_type=WordsResponse, url=url, method="post", headers=headers, timeout=timeout, payload=payload
-        )
+        return self._send_request(response_type=WordsResponse, url=url, method="post", timeout=timeout, payload=payload)
 
 
 class ChadGPTClient(ChadGPTBaseClient):
@@ -169,8 +233,6 @@ class ChadGPTClient(ChadGPTBaseClient):
     Позволяет отправлять запросы различным моделям GPT и Claude,
     передавать историю сообщений, изображения и управлять параметрами запроса.
     """
-
-    BASE_URL = "https://ask.chadgpt.ru/api/public/"
 
     # Словарь сопоставления названий моделей и их API-путей
     _MODELS = {
@@ -195,15 +257,43 @@ class ChadGPTClient(ChadGPTBaseClient):
         "gpt-4o",
         "claude-3-haiku",
         "claude-3-opus",
-        "claude-3-7-sonnet-thinking",
+        "claude-3.7-sonnet-thinking",
     }
+
+    def _validate_history(self, history: list[ChatHistoryRow] | None) -> None:
+        """
+        Валидирует формат истории сообщений.
+
+        Args:
+            history: История сообщений для валидации.
+
+        Raises:
+            ValueError: Если формат истории неверный.
+        """
+        if history is None:
+            return
+
+        valid_roles = {"user", "assistant", "system"}
+        for i, message in enumerate(history):
+            if not isinstance(message, dict):
+                raise ValueError(f"История должна содержать словари. Элемент {i} имеет тип {type(message).__name__}")
+
+            role = message.get("role")
+            if not role or role not in valid_roles:
+                raise ValueError(
+                    f"Неверная роль '{role}' в сообщении {i}. Допустимые роли: {', '.join(sorted(valid_roles))}"
+                )
+
+            content = message.get("content")
+            if not content or not isinstance(content, str):
+                raise ValueError(f"Сообщение {i} должно содержать непустое строковое поле 'content'")
 
     def ask(
         self,
         model_name: str,
         message: str,
-        history: list[ChatHistoryRow] | None,
-        temperature: float | None | None = None,
+        history: list[ChatHistoryRow] | None = None,
+        temperature: float | None = None,
         max_tokens: int | None = None,
         images: list[str] | None = None,
         timeout: int | None = None,
@@ -224,7 +314,7 @@ class ChadGPTClient(ChadGPTBaseClient):
             dict: JSON-ответ от API.
 
         Raises:
-            ValueError: Если указана неподдерживаемая модель.
+            ValueError: Если указана неподдерживаемая модель или неверный формат истории.
         """
         if model_name not in self._MODELS:
             raise ValueError(f"Неподдерживаемая модель: '{model_name}'. Доступные модели: {', '.join(self._MODELS)}")
@@ -236,6 +326,8 @@ class ChadGPTClient(ChadGPTBaseClient):
                 DeprecationWarning,
                 stacklevel=1,
             )
+
+        self._validate_history(history)
 
         url = f"{self.BASE_URL}{model_name}"
 
@@ -252,11 +344,7 @@ class ChadGPTClient(ChadGPTBaseClient):
         if images is not None:
             payload["images"] = images
 
-        headers = {"Content-Type": "application/json"}
-
-        return self._send_request(
-            response_type=ChatResponse, url=url, method="post", headers=headers, timeout=timeout, payload=payload
-        )
+        return self._send_request(response_type=ChatResponse, url=url, method="post", timeout=timeout, payload=payload)
 
     # --- Методы для каждой поддерживаемой модели ---
 
@@ -346,7 +434,7 @@ class ChadGPTClient(ChadGPTBaseClient):
         images: list[str] | None = None,
     ) -> ChatResponse:
         """Отправляет запрос модели Claude 4.1 Opus."""
-        return self.ask("claude-4-1-opus", message, history, temperature, max_tokens, images)
+        return self.ask("claude-4.1-opus", message, history, temperature, max_tokens, images)
 
     def ask_claude_4_5_sonnet(
         self,
@@ -357,7 +445,7 @@ class ChadGPTClient(ChadGPTBaseClient):
         images: list[str] | None = None,
     ) -> ChatResponse:
         """Отправляет запрос модели Claude 4.5 Sonnet."""
-        return self.ask("claude-4-5-sonnet", message, history, temperature, max_tokens, images)
+        return self.ask("claude-4.5-sonnet", message, history, temperature, max_tokens, images)
 
     def ask_claude_3_7_sonnet_thinking(
         self,
@@ -368,7 +456,7 @@ class ChadGPTClient(ChadGPTBaseClient):
         images: list[str] | None = None,
     ) -> ChatResponse:
         """Отправляет запрос модели Claude 3.7 Sonnet Thinking (устаревшая)."""
-        return self.ask("claude-3-7-sonnet-thinking", message, history, temperature, max_tokens, images)
+        return self.ask("claude-3.7-sonnet-thinking", message, history, temperature, max_tokens, images)
 
     def ask_gemini_2_0_flash(
         self,
@@ -379,7 +467,7 @@ class ChadGPTClient(ChadGPTBaseClient):
         images: list[str] | None = None,
     ) -> ChatResponse:
         """Отправляет запрос модели Gemini 2.0 Flash."""
-        return self.ask("gemini-2-0-flash", message, history, temperature, max_tokens, images)
+        return self.ask("gemini-2.0-flash", message, history, temperature, max_tokens, images)
 
     def ask_gemini_2_5_pro(
         self,
@@ -390,7 +478,7 @@ class ChadGPTClient(ChadGPTBaseClient):
         images: list[str] | None = None,
     ) -> ChatResponse:
         """Отправляет запрос модели Gemini 2.5 Pro."""
-        return self.ask("gemini-2-5-pro", message, history, temperature, max_tokens, images)
+        return self.ask("gemini-2.5-pro", message, history, temperature, max_tokens, images)
 
     def ask_deepseek_v3_1(
         self,
@@ -401,11 +489,14 @@ class ChadGPTClient(ChadGPTBaseClient):
         images: list[str] | None = None,
     ) -> ChatResponse:
         """Отправляет запрос модели Deepseek v3.1."""
-        return self.ask("deepseek-v3-1", message, history, temperature, max_tokens, images)
+        return self.ask("deepseek-v3.1", message, history, temperature, max_tokens, images)
 
 
 class ChadGPTImageClient(ChadGPTBaseClient):
-    CHECK_URL = f"{ChadGPTBaseClient.BASE_URL}check"
+    @property
+    def check_url(self) -> str:
+        """URL для проверки статуса генерации изображений."""
+        return f"{self.BASE_URL}check"
 
     def _validate_imagine_params(self, model_name: str, prompt: str, **kwargs: Any) -> dict[str, Any]:
         """
@@ -429,15 +520,17 @@ class ChadGPTImageClient(ChadGPTBaseClient):
             )
 
         prompt_stripped = prompt.strip()
-        if not prompt_stripped or len(prompt_stripped) > 1000:
+        if not prompt_stripped or len(prompt_stripped) > MAX_PROMPT_LENGTH:
             raise ValueError(
-                f"Prompt must be a non-empty string with max 1000 characters. Current length: {len(prompt_stripped)}"
+                f"Prompt must be a non-empty string with max {MAX_PROMPT_LENGTH} characters. Current length: {len(prompt_stripped)}"
             )
 
         payload = {"api_key": self.api_key, "prompt": prompt_stripped}
         validator = MODEL_VALIDATORS[model_name]
         params = validator(**kwargs)
-        payload.update(params)
+        # Конвертируем Pydantic модель в словарь, исключая None значения
+        params_dict = params.model_dump(exclude_none=True)
+        payload.update(params_dict)
         return payload
 
     def imagine(self, model_name: str, prompt: str, **kwargs: Any) -> ImagineResponse:
@@ -472,8 +565,8 @@ class ChadGPTImageClient(ChadGPTBaseClient):
         Raises:
             ValueError: Если API ключ или content_id недействительны, или при ошибке API.
         """
-        if not content_id or not isinstance(content_id, str):
+        if not isinstance(content_id, str) or not content_id.strip():
             raise ValueError("Content ID must be a non-empty string.")
 
         payload = {"api_key": self.api_key, "content_id": content_id}
-        return self._send_request(response_type=CheckResponse, url=self.CHECK_URL, method="get", payload=payload)
+        return self._send_request(response_type=CheckResponse, url=self.check_url, method="get", params=payload)
