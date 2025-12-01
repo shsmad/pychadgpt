@@ -1,92 +1,63 @@
+"""
+ChadGPT API Client - улучшенная версия с автогенерацией методов,
+кастомными исключениями, логированием и валидацией через Pydantic.
+"""
+
+
+import contextlib
 import json
+import logging
 import warnings
 
-from collections.abc import Mapping
+from collections.abc import Callable
 from enum import Enum
-from typing import Any, Required, TypedDict, TypeVar, cast
+from typing import Any, TypeVar, cast
 
 import requests
 
+from pydantic import BaseModel
 from requests import Response, Session
 
+from pychadgpt.exceptions import (
+    ChadGPTAPIError,
+    ChadGPTConnectionError,
+    ChadGPTError,
+    ChadGPTHTTPError,
+    ChadGPTJSONDecodeError,
+    ChadGPTTimeoutError,
+    ChadGPTValidationError,
+)
 from pychadgpt.image_models_config import MODEL_VALIDATORS
+from pychadgpt.models import (
+    AskParameters,
+    ChatHistoryMessage,
+    ChatResponse,
+    CheckResponse,
+    ImagineParameters,
+    ImagineResponse,
+    WordsResponse,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def setup_logging(level: int = logging.INFO) -> None:
+    """
+    Настраивает логирование для библиотеки.
+
+    Args:
+        level: Уровень логирования (по умолчанию INFO)
+
+    Example:
+        >>> from pychadgpt import setup_logging
+        >>> setup_logging(logging.DEBUG)
+    """
+    logging.basicConfig(level=level, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+
 
 # Определяем TypeVar для универсального типа возвращаемого значения.
 # `bound=TypedDict` гарантирует, что T будет TypedDict.
-TResponse = TypeVar("TResponse", bound=Mapping[str, Any])
-
-
-class ChatHistoryRow(TypedDict, total=False):
-    # Кто отправил сообщение. Допустимые значения: "user", "assistant", "system".
-    # Значение "system" в GPT моделях даёт приоритет этому промту, а в Claude не отличается от "user".
-    role: Required[str]
-    # Содержимое сообщения
-    content: Required[str]
-    # Картинки для передачи в нейросеть: строки, которые могут быть в одном из следующих форматов:
-    # - URL на картинку (https)
-    # - base64 dataUrl (документация)
-    images: list[str]
-
-
-class ChatResponse(TypedDict, total=False):
-    # Успешен ли ответ
-    is_success: Required[bool]
-    # Текст ответа от нейросети, в случае если is_success = True.
-    response: str
-    # Количество израсходованных слов на персональном тарифе.
-    # Если используется корпоративный аккаунт, всегда возвращает 0.
-    # Отправляется только если is_success = True.
-    used_words_count: int
-    # Количество израсходованных токенов на корпоративном тарифе.
-    # Если используется персональный тариф, всегда возвращает 0.
-    # Отправляется только если is_success = True.
-    used_tokens_count: int
-    # Код ошибки, если is_success = False.
-    error_code: str
-    # Название ошибки, если is_success = False
-    error_message: str
-    # Если присутствует в ответе, значит, модель устарела и скоро может быть удалена.
-    # Содержит текст сообщения с более подробной информацией.
-    # Если в ответах на ваши запросы стало появляться такое поле, значит, во
-    # избежание проблем в будущем стоит указывать более новую модель.
-    deprecated: str
-
-
-class WordsResponse(TypedDict, total=False):
-    # Успешен ли ответ
-    is_success: Required[bool]
-    used_words: int
-    total_words: int
-    remaining_words: int
-    reserved_words: int
-    error_code: str
-    error_message: str
-
-
-class ImagineResponse(TypedDict, total=False):
-    status: Required[str]  # starting / failed
-    content_id: str
-    created_at: str
-    input: Any
-    model: str
-    error_code: str
-    error_message: str
-
-
-class CheckResponse(TypedDict, total=False):
-    # Возможные статусы:
-    # - pending: Генерация в процессе
-    # - completed: Генерация завершена успешно
-    # - failed: Генерация завершилась с ошибкой
-    # - cancelled: Генерация отменена
-    status: Required[str]
-    # Временные метки представлены в формате ISO 8601 (UTC)
-    created_at: str
-    started_at: str
-    completed_at: str
-    output: list[str]
-    error_code: str
-    error_message: str
+TResponse = TypeVar("TResponse", bound=BaseModel)
 
 
 class HTTPMethod(str, Enum):
@@ -100,18 +71,89 @@ class HTTPMethod(str, Enum):
 MAX_PROMPT_LENGTH = 1000
 DEFAULT_TIMEOUT_SECONDS = 30
 
-# Коды ошибок клиента
-class ErrorCodes:
-    """Коды ошибок клиента."""
+# ============================================================================
+# МЕТАКЛАСС ДЛЯ АВТОГЕНЕРАЦИИ МЕТОДОВ
+# ============================================================================
 
-    HTTP_ERROR_NO_JSON = "CLI-001"
-    CONNECTION_ERROR = "CLI-002"
-    TIMEOUT_ERROR = "CLI-003"
-    REQUEST_ERROR = "CLI-004"
-    JSON_DECODE_ERROR = "CLI-005"
 
+class ModelMethodsMeta(type):
+    """
+    Метакласс для автоматической генерации методов ask_* для каждой модели.
+
+    Создает методы вида ask_gpt5(), ask_claude_4_5_sonnet() и т.д.
+    на основе списка моделей из атрибута _MODELS класса.
+    """
+
+    def __new__(mcs, name: str, bases: tuple[type, ...], namespace: dict[str, Any]) -> type:
+        cls = super().__new__(mcs, name, bases, namespace)
+
+        # Генерируем методы только для ChadGPTClient
+        if name == "ChadGPTClient" and "_MODELS" in namespace:
+            models = namespace["_MODELS"]
+            deprecated_models = namespace.get("_DEPRECATED_MODELS", set())
+
+            for model_name in models:
+                method_name = f"ask_{model_name.replace('-', '_').replace('.', '_')}"
+
+                # Создаем метод динамически
+                def create_method(model: str, is_deprecated: bool, m_name: str) -> Callable[..., ChatResponse]:
+                    def method(
+                        self: "ChadGPTClient",
+                        message: str,
+                        history: list[ChatHistoryMessage] | None = None,
+                        temperature: float | None = None,
+                        max_tokens: int | None = None,
+                        images: list[str] | None = None,
+                    ) -> ChatResponse:
+                        return self.ask(model, message, history, temperature, max_tokens, images)
+
+                    docstring = f"""
+                    Отправляет запрос модели {model}.
+                    {" (УСТАРЕВШАЯ - рекомендуется использовать более новую модель)" if is_deprecated else ""}
+
+                    Args:
+                        message: Запрос к нейросети
+                        history: История предыдущих сообщений
+                        temperature: Температура генерации (0-2)
+                        max_tokens: Максимальное количество токенов
+                        images: Список изображений (URL или base64)
+
+                    Returns:
+                        ChatResponse: Ответ от модели
+
+                    Raises:
+                        ChadGPTValidationError: При неверных параметрах
+                        ChadGPTConnectionError: При ошибке соединения
+                        ChadGPTTimeoutError: При превышении таймаута
+
+                    Example:
+                        >>> client = ChadGPTClient("your-api-key")
+                        >>> response = client.{m_name}("Привет!")
+                        >>> if response.is_success:
+                        ...     print(response.response)
+                    """
+
+                    method.__doc__ = docstring
+                    method.__name__ = m_name
+                    return method
+
+                is_deprecated = model_name in deprecated_models
+                setattr(cls, method_name, create_method(model_name, is_deprecated, method_name))
+
+        return cls
 
 class ChadGPTBaseClient:
+    """
+    Базовый клиент для взаимодействия с ChadGPT API.
+
+    Предоставляет общие методы для HTTP-запросов и управления сессией.
+
+    Example:
+        >>> with ChadGPTBaseClient("your-api-key") as client:
+        ...     stat = client.get_stat_info()
+        ...     print(f"Осталось слов: {stat.remaining_words}")
+    """
+
     BASE_URL = "https://ask.chadgpt.ru/api/public/"
 
     def __init__(self, api_key: str):
@@ -120,15 +162,22 @@ class ChadGPTBaseClient:
 
         Args:
             api_key (str): Ваш персональный API-ключ.
+
+        Raises:
+            ChadGPTValidationError: Если API ключ пустой
         """
+
         if not api_key or not api_key.strip():
-            raise ValueError("API key не может быть пустым.")
+            raise ChadGPTValidationError("API key не может быть пустым.", "INVALID_API_KEY")
+
         self.api_key = api_key
         self._session = Session()
+        logger.info("ChadGPT клиент инициализирован")
 
     def close(self) -> None:
         """Закрывает HTTP-сессию и освобождает соединения."""
         self._session.close()
+        logger.info("ChadGPT клиент закрыт")
 
     def __enter__(self) -> "ChadGPTBaseClient":
         return self
@@ -146,12 +195,36 @@ class ChadGPTBaseClient:
         payload: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
     ) -> TResponse:
+        """
+        Отправляет HTTP-запрос к API.
+
+        Args:
+            response_type: Тип ожидаемого ответа (Pydantic модель)
+            url: URL для запроса
+            method: HTTP метод (get/post)
+            headers: Дополнительные заголовки
+            timeout: Таймаут запроса в секундах
+            payload: Тело запроса (для POST)
+            params: Query параметры (для GET)
+
+        Returns:
+            Объект response_type с данными ответа
+
+        Raises:
+            ChadGPTHTTPError: При HTTP ошибке
+            ChadGPTConnectionError: При ошибке соединения
+            ChadGPTTimeoutError: При превышении таймаута
+            ChadGPTJSONDecodeError: При ошибке парсинга JSON
+        """
+
         method_normalized = method.lower()
         try:
             http_method = HTTPMethod(method_normalized)
         except ValueError:
             allowed_methods = ", ".join(sorted(m.value for m in HTTPMethod))
-            raise ValueError(f"Unsupported HTTP method '{method}'. Allowed: {allowed_methods}") from None
+            raise ChadGPTValidationError(
+                f"Неподдерживаемый HTTP метод '{method}'. Допустимые: {allowed_methods}", "INVALID_HTTP_METHOD"
+            ) from None
 
         merged_headers = {"Content-Type": "application/json"}
         if headers:
@@ -159,6 +232,11 @@ class ChadGPTBaseClient:
 
         request_timeout = timeout if timeout is not None else DEFAULT_TIMEOUT_SECONDS
         response: Response | None = None
+
+        logger.debug(
+            f"Отправка {http_method.value.upper()} запроса к {url} "
+            f"(timeout={request_timeout}s, payload_size={len(str(payload)) if payload else 0})"
+        )
 
         try:
             request_kwargs: dict[str, Any] = {
@@ -176,62 +254,120 @@ class ChadGPTBaseClient:
                 request_kwargs["params"].update(payload)
 
             response = self._session.request(method=http_method.value, **request_kwargs)
+            logger.debug(f"Получен ответ: status={response.status_code}, size={len(response.content)} bytes")
             response.raise_for_status()  # Вызовет HTTPError для статусов 4xx/5xx
-            return cast(TResponse, response.json())
+            json_data = response.json()
+            logger.debug(f"JSON ответ: {json.dumps(json_data, ensure_ascii=False)[:200]}...")
+
+            # Валидируем через Pydantic если это BaseModel
+            if issubclass(response_type, BaseModel):
+                return response_type.model_validate(json_data)  # type: ignore
+
+            return cast(TResponse, json_data)
         except requests.exceptions.HTTPError as http_err:
+            logger.error(f"HTTP ошибка: {http_err}")
             # Попытка парсинга ошибки из ответа API, даже если это HTTP-ошибка
-            try:
+            with contextlib.suppress(json.JSONDecodeError):
                 if response is not None:
+                    json_data = response.json()
+                    if issubclass(response_type, BaseModel):
+                        return response_type.model_validate(json_data)  # type: ignore
                     return cast(TResponse, response.json())
                 raise
-            except json.JSONDecodeError:
-                return {
-                    "is_success": False,
-                    "error_code": ErrorCodes.HTTP_ERROR_NO_JSON,
-                    "error_message": f"HTTP-ошибка, но не удалось разобрать JSON: {http_err}. "
-                    f"Текст ответа: {response.text if response is not None else 'N/A'}",
-                }  # type: ignore
+
+            raise ChadGPTHTTPError(
+                f"HTTP ошибка: {http_err}. Ответ: {response.text if response else 'N/A'}",
+                status_code=response.status_code if response else 0,
+                error_code="HTTP_ERROR",
+            ) from None
+
         except requests.exceptions.ConnectionError as conn_err:
-            return {"is_success": False, "error_code": ErrorCodes.CONNECTION_ERROR, "error_message": f"Ошибка соединения: {conn_err}"}  # type: ignore
+            logger.error(f"Ошибка соединения: {conn_err}")
+            raise ChadGPTConnectionError(f"Не удалось подключиться к API: {conn_err}", "CONNECTION_ERROR") from None
+
         except requests.exceptions.Timeout as timeout_err:
-            return {
-                "is_success": False,
-                "error_code": ErrorCodes.TIMEOUT_ERROR,
-                "error_message": f"Превышено время ожидания запроса: {timeout_err}",
-            }  # type: ignore
+            logger.error(f"Таймаут: {timeout_err}")
+            raise ChadGPTTimeoutError(
+                f"Превышено время ожидания ({request_timeout}s): {timeout_err}", "TIMEOUT_ERROR"
+            ) from None
+
         except requests.exceptions.RequestException as req_err:
-            return {
-                "is_success": False,
-                "error_code": ErrorCodes.REQUEST_ERROR,
-                "error_message": f"Непредвиденная ошибка запроса: {req_err}",
-            }  # type: ignore
+            logger.error(f"Ошибка запроса: {req_err}")
+            raise ChadGPTError(f"Непредвиденная ошибка при запросе: {req_err}", "REQUEST_ERROR") from None
+
         except json.JSONDecodeError as json_err:
-            return {
-                "is_success": False,
-                "error_code": ErrorCodes.JSON_DECODE_ERROR,
-                "error_message": f"Не удалось декодировать JSON ответ: {json_err}. "
-                f"Текст ответа: {response.text if response is not None else 'N/A'}",
-            }  # type: ignore
+            logger.error(f"Ошибка парсинга JSON: {json_err}")
+            raise ChadGPTJSONDecodeError(
+                f"Не удалось декодировать JSON: {json_err}. Ответ: {response.text if response else 'N/A'}",
+                "JSON_DECODE_ERROR",
+            ) from None
 
     def get_stat_info(self, timeout: int | None = None) -> WordsResponse:
         """
         Позволяет определить общее количество слов, использованных,
         зарезервированных (в текущих генерациях контента) и оставшихся.
+
+        Args:
+            timeout: Таймаут запроса в секундах
+
+        Returns:
+            WordsResponse: Статистика по словам
+
+        Example:
+            >>> client = ChadGPTClient("your-api-key")
+            >>> stat = client.get_stat_info()
+            >>> print(f"Использовано: {stat.used_words}/{stat.total_words}")
+            >>> print(f"Осталось: {stat.remaining_words}")
         """
+
         url = f"{self.BASE_URL}words"
 
         payload: dict[str, Any] = {
             "api_key": self.api_key,
         }
-        return self._send_request(response_type=WordsResponse, url=url, method="post", timeout=timeout, payload=payload)
+        response = self._send_request(
+            response_type=WordsResponse, url=url, method="post", timeout=timeout, payload=payload
+        )
+        if not response.is_success and response.error_code:
+            raise ChadGPTAPIError(response.error_message or "Неизвестная ошибка API", response.error_code)
+
+        return response
 
 
-class ChadGPTClient(ChadGPTBaseClient):
+# ============================================================================
+# КЛИЕНТ ДЛЯ CHAT API
+# ============================================================================
+
+
+class ChadGPTClient(ChadGPTBaseClient, metaclass=ModelMethodsMeta):
     """
     Клиент для взаимодействия с ChadGPT API.
 
     Позволяет отправлять запросы различным моделям GPT и Claude,
     передавать историю сообщений, изображения и управлять параметрами запроса.
+
+    Example:
+        >>> # Базовое использование
+        >>> client = ChadGPTClient("your-api-key")
+        >>> response = client.ask_gpt5("Расскажи про Python")
+        >>> if response.is_success:
+        ...     print(response.response)
+
+        >>> # С историей и параметрами
+        >>> history = [
+        ...     ChatHistoryMessage(role="user", content="Привет!"),
+        ...     ChatHistoryMessage(role="assistant", content="Здравствуйте!")
+        ... ]
+        >>> response = client.ask_claude_4_5_sonnet(
+        ...     message="Продолжи разговор",
+        ...     history=history,
+        ...     temperature=0.7,
+        ...     max_tokens=1000
+        ... )
+
+        >>> # Context manager
+        >>> with ChadGPTClient("your-api-key") as client:
+        ...     response = client.ask_gemini_2_5_pro("Hello!")
     """
 
     # Словарь сопоставления названий моделей и их API-путей
@@ -260,39 +396,11 @@ class ChadGPTClient(ChadGPTBaseClient):
         "claude-3.7-sonnet-thinking",
     }
 
-    def _validate_history(self, history: list[ChatHistoryRow] | None) -> None:
-        """
-        Валидирует формат истории сообщений.
-
-        Args:
-            history: История сообщений для валидации.
-
-        Raises:
-            ValueError: Если формат истории неверный.
-        """
-        if history is None:
-            return
-
-        valid_roles = {"user", "assistant", "system"}
-        for i, message in enumerate(history):
-            if not isinstance(message, dict):
-                raise ValueError(f"История должна содержать словари. Элемент {i} имеет тип {type(message).__name__}")
-
-            role = message.get("role")
-            if not role or role not in valid_roles:
-                raise ValueError(
-                    f"Неверная роль '{role}' в сообщении {i}. Допустимые роли: {', '.join(sorted(valid_roles))}"
-                )
-
-            content = message.get("content")
-            if not content or not isinstance(content, str):
-                raise ValueError(f"Сообщение {i} должно содержать непустое строковое поле 'content'")
-
     def ask(
         self,
         model_name: str,
         message: str,
-        history: list[ChatHistoryRow] | None = None,
+        history: list[ChatHistoryMessage] | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
         images: list[str] | None = None,
@@ -309,190 +417,116 @@ class ChadGPTClient(ChadGPTBaseClient):
             temperature (float, optional): Настройка температуры GPT (от 0 до 2). Defaults to None.
             max_tokens (int, optional): Максимальная длина ответа в токенах. Defaults to None.
             images (list, optional): Список URL или base64 Data URL изображений. Defaults to None.
+            timeout: Таймаут запроса в секундах
 
         Returns:
-            dict: JSON-ответ от API.
+            ChatResponse: Ответ от модели
 
         Raises:
-            ValueError: Если указана неподдерживаемая модель или неверный формат истории.
+            ChadGPTValidationError: При неверных параметрах
+            ChadGPTConnectionError: При ошибке соединения
+            ChadGPTTimeoutError: При превышении таймаута
+            ChadGPTAPIError: При ошибке от API
+
+        Example:
+            >>> client = ChadGPTClient("your-api-key")
+            >>> response = client.ask(
+            ...     model_name="gpt-5",
+            ...     message="Что такое Python?",
+            ...     temperature=0.7,
+            ...     max_tokens=500
+            ... )
         """
+
         if model_name not in self._MODELS:
-            raise ValueError(f"Неподдерживаемая модель: '{model_name}'. Доступные модели: {', '.join(self._MODELS)}")
+            available = ", ".join(sorted(self._MODELS))
+            raise ChadGPTValidationError(
+                f"Неподдерживаемая модель: '{model_name}'. Доступные: {available}", "INVALID_MODEL"
+            )
 
         if model_name in self._DEPRECATED_MODELS:
             warnings.warn(
                 f"Модель '{model_name}' устарела и может быть удалена в будущем. "
-                "Рассмотрите возможность использования более новых моделей.",
+                "Рекомендуется использовать более новые модели.",
                 DeprecationWarning,
-                stacklevel=1,
+                stacklevel=2,
             )
+            logger.warning(f"Использована устаревшая модель: {model_name}")
 
-        self._validate_history(history)
+        # Валидация параметров через Pydantic
+        try:
+            params = AskParameters(
+                message=message, history=history, temperature=temperature, max_tokens=max_tokens, images=images
+            )
+        except Exception as e:
+            raise ChadGPTValidationError(f"Ошибка валидации параметров: {e}", "VALIDATION_ERROR") from e
 
         url = f"{self.BASE_URL}{model_name}"
 
         payload: dict[str, Any] = {
-            "message": message,
+            "message": params.message,
             "api_key": self.api_key,
         }
-        if history is not None:
-            payload["history"] = history
-        if temperature is not None:
-            payload["temperature"] = temperature
-        if max_tokens is not None:
-            payload["max_tokens"] = max_tokens
-        if images is not None:
-            payload["images"] = images
+        if params.history is not None:
+            payload["history"] = [msg.model_dump(exclude_none=True) for msg in params.history]
+        if params.temperature is not None:
+            payload["temperature"] = params.temperature
+        if params.max_tokens is not None:
+            payload["max_tokens"] = params.max_tokens
+        if params.images is not None:
+            payload["images"] = params.images
 
-        return self._send_request(response_type=ChatResponse, url=url, method="post", timeout=timeout, payload=payload)
+        response = self._send_request(
+            response_type=ChatResponse, url=url, method="post", timeout=timeout, payload=payload
+        )
 
-    # --- Методы для каждой поддерживаемой модели ---
+        if not response.is_success and response.error_code:
+            logger.error(f"API вернул ошибку: {response.error_code} - {response.error_message}")
+            raise ChadGPTAPIError(response.error_message or "Неизвестная ошибка API", response.error_code)
 
-    def ask_gpt5(
-        self,
-        message: str,
-        history: list[ChatHistoryRow] | None = None,
-        temperature: float | None = None,
-        max_tokens: int | None = None,
-        images: list[str] | None = None,
-    ) -> ChatResponse:
-        """Отправляет запрос модели GPT-5."""
-        return self.ask("gpt-5", message, history, temperature, max_tokens, images)
+        if response.deprecated:
+            logger.warning(f"Модель устарела: {response.deprecated}")
 
-    def ask_gpt5_mini(
-        self,
-        message: str,
-        history: list[ChatHistoryRow] | None = None,
-        temperature: float | None = None,
-        max_tokens: int | None = None,
-        images: list[str] | None = None,
-    ) -> ChatResponse:
-        """Отправляет запрос модели GPT-5 Mini."""
-        return self.ask("gpt-5-mini", message, history, temperature, max_tokens, images)
+        return response
 
-    def ask_gpt5_nano(
-        self,
-        message: str,
-        history: list[ChatHistoryRow] | None = None,
-        temperature: float | None = None,
-        max_tokens: int | None = None,
-        images: list[str] | None = None,
-    ) -> ChatResponse:
-        """Отправляет запрос модели GPT-5 Nano."""
-        return self.ask("gpt-5-nano", message, history, temperature, max_tokens, images)
 
-    def ask_gpt4o_mini(
-        self,
-        message: str,
-        history: list[ChatHistoryRow] | None = None,
-        temperature: float | None = None,
-        max_tokens: int | None = None,
-        images: list[str] | None = None,
-    ) -> ChatResponse:
-        """Отправляет запрос модели GPT-4o Mini (устаревшая)."""
-        return self.ask("gpt-4o-mini", message, history, temperature, max_tokens, images)
-
-    def ask_gpt4o(
-        self,
-        message: str,
-        history: list[ChatHistoryRow] | None = None,
-        temperature: float | None = None,
-        max_tokens: int | None = None,
-        images: list[str] | None = None,
-    ) -> ChatResponse:
-        """Отправляет запрос модели GPT-4o (устаревшая)."""
-        return self.ask("gpt-4o", message, history, temperature, max_tokens, images)
-
-    def ask_claude_3_haiku(
-        self,
-        message: str,
-        history: list[ChatHistoryRow] | None = None,
-        temperature: float | None = None,
-        max_tokens: int | None = None,
-        images: list[str] | None = None,
-    ) -> ChatResponse:
-        """Отправляет запрос модели Claude 3 Haiku (устаревшая)."""
-        return self.ask("claude-3-haiku", message, history, temperature, max_tokens, images)
-
-    def ask_claude_3_opus(
-        self,
-        message: str,
-        history: list[ChatHistoryRow] | None = None,
-        temperature: float | None = None,
-        max_tokens: int | None = None,
-        images: list[str] | None = None,
-    ) -> ChatResponse:
-        """Отправляет запрос модели Claude 3 Opus (устаревшая)."""
-        return self.ask("claude-3-opus", message, history, temperature, max_tokens, images)
-
-    def ask_claude_4_1_opus(
-        self,
-        message: str,
-        history: list[ChatHistoryRow] | None = None,
-        temperature: float | None = None,
-        max_tokens: int | None = None,
-        images: list[str] | None = None,
-    ) -> ChatResponse:
-        """Отправляет запрос модели Claude 4.1 Opus."""
-        return self.ask("claude-4.1-opus", message, history, temperature, max_tokens, images)
-
-    def ask_claude_4_5_sonnet(
-        self,
-        message: str,
-        history: list[ChatHistoryRow] | None = None,
-        temperature: float | None = None,
-        max_tokens: int | None = None,
-        images: list[str] | None = None,
-    ) -> ChatResponse:
-        """Отправляет запрос модели Claude 4.5 Sonnet."""
-        return self.ask("claude-4.5-sonnet", message, history, temperature, max_tokens, images)
-
-    def ask_claude_3_7_sonnet_thinking(
-        self,
-        message: str,
-        history: list[ChatHistoryRow] | None = None,
-        temperature: float | None = None,
-        max_tokens: int | None = None,
-        images: list[str] | None = None,
-    ) -> ChatResponse:
-        """Отправляет запрос модели Claude 3.7 Sonnet Thinking (устаревшая)."""
-        return self.ask("claude-3.7-sonnet-thinking", message, history, temperature, max_tokens, images)
-
-    def ask_gemini_2_0_flash(
-        self,
-        message: str,
-        history: list[ChatHistoryRow] | None = None,
-        temperature: float | None = None,
-        max_tokens: int | None = None,
-        images: list[str] | None = None,
-    ) -> ChatResponse:
-        """Отправляет запрос модели Gemini 2.0 Flash."""
-        return self.ask("gemini-2.0-flash", message, history, temperature, max_tokens, images)
-
-    def ask_gemini_2_5_pro(
-        self,
-        message: str,
-        history: list[ChatHistoryRow] | None = None,
-        temperature: float | None = None,
-        max_tokens: int | None = None,
-        images: list[str] | None = None,
-    ) -> ChatResponse:
-        """Отправляет запрос модели Gemini 2.5 Pro."""
-        return self.ask("gemini-2.5-pro", message, history, temperature, max_tokens, images)
-
-    def ask_deepseek_v3_1(
-        self,
-        message: str,
-        history: list[ChatHistoryRow] | None = None,
-        temperature: float | None = None,
-        max_tokens: int | None = None,
-        images: list[str] | None = None,
-    ) -> ChatResponse:
-        """Отправляет запрос модели Deepseek v3.1."""
-        return self.ask("deepseek-v3.1", message, history, temperature, max_tokens, images)
+# ============================================================================
+# КЛИЕНТ ДЛЯ IMAGE API
+# ============================================================================
 
 
 class ChadGPTImageClient(ChadGPTBaseClient):
+    """
+    Клиент для работы с генерацией изображений через ChadGPT API.
+
+    Поддерживает различные модели генерации изображений и позволяет
+    отслеживать статус генерации.
+
+    Example:
+        >>> client = ChadGPTImageClient("your-api-key")
+        >>>
+        >>> # Запускаем генерацию
+        >>> response = client.imagine(
+        ...     model_name="imagen-4",
+        ...     prompt="Beautiful sunset over mountains"
+        ... )
+        >>>
+        >>> if response.status == "starting":
+        ...     content_id = response.content_id
+        ...
+        ...     # Проверяем статус
+        ...     import time
+        ...     while True:
+        ...         status = client.check_status(content_id)
+        ...         if status.status == "completed":
+        ...             print(f"Готово! Изображения: {status.output}")
+        ...             break
+        ...         elif status.status == "failed":
+        ...             print(f"Ошибка: {status.error_message}")
+        ...             break
+        ...         time.sleep(2)
+    """
+
     @property
     def check_url(self) -> str:
         """URL для проверки статуса генерации изображений."""
@@ -500,73 +534,124 @@ class ChadGPTImageClient(ChadGPTBaseClient):
 
     def _validate_imagine_params(self, model_name: str, prompt: str, **kwargs: Any) -> dict[str, Any]:
         """
-        Приватный метод для валидации параметров запроса генерации изображения.
+        Валидирует параметры для генерации изображения.
 
         Args:
-            model_name (str): Имя модели.
-            prompt (str): Промпт.
-            kwargs (dict): Дополнительные параметры.
+            model_name: Имя модели
+            prompt: Текстовое описание
+            kwargs: Дополнительные параметры модели
 
         Returns:
-            dict: Валидированный payload для отправки.
+            dict: Валидированный payload
 
         Raises:
-            ValueError: Если параметры не соответствуют требованиям.
+            ChadGPTValidationError: При неверных параметрах
         """
 
         if model_name not in MODEL_VALIDATORS:
-            raise ValueError(
-                f"Unsupported model: '{model_name}'. Available models: {', '.join(MODEL_VALIDATORS.keys())}"
+            available = ", ".join(sorted(MODEL_VALIDATORS.keys()))
+            raise ChadGPTValidationError(
+                f"Неподдерживаемая модель: '{model_name}'. Доступные: {available}", "INVALID_MODEL"
             )
 
-        prompt_stripped = prompt.strip()
-        if not prompt_stripped or len(prompt_stripped) > MAX_PROMPT_LENGTH:
-            raise ValueError(
-                f"Prompt must be a non-empty string with max {MAX_PROMPT_LENGTH} characters. Current length: {len(prompt_stripped)}"
-            )
+        # Базовая валидация через Pydantic
+        try:
+            base_params = ImagineParameters(prompt=prompt)
+        except Exception as e:
+            raise ChadGPTValidationError(f"Ошибка валидации промпта: {e}", "VALIDATION_ERROR") from e
 
-        payload = {"api_key": self.api_key, "prompt": prompt_stripped}
+        payload = {"api_key": self.api_key, "prompt": base_params.prompt}
+
+        # Валидация специфичных для модели параметров
         validator = MODEL_VALIDATORS[model_name]
-        params = validator(**kwargs)
-        # Конвертируем Pydantic модель в словарь, исключая None значения
-        params_dict = params.model_dump(exclude_none=True)
-        payload.update(params_dict)
+        try:
+            params = validator(**kwargs)
+            params_dict = params.model_dump(exclude_none=True)
+            payload.update(params_dict)
+        except Exception as e:
+            raise ChadGPTValidationError(
+                f"Ошибка валидации параметров модели: {e}", "MODEL_PARAMS_VALIDATION_ERROR"
+            ) from e
+
         return payload
 
-    def imagine(self, model_name: str, prompt: str, **kwargs: Any) -> ImagineResponse:
+    def imagine(self, model_name: str, prompt: str, timeout: int | None = None, **kwargs: Any) -> ImagineResponse:
         """
-        Запускает генерацию изображения с использованием указанной модели.
+        Запускает генерацию изображения.
 
         Args:
-            model_name (str): Имя модели для генерации (например, "imagen-4", "mj-6").
-            prompt (str): Текстовое описание изображения (1-1000 символов).
-            **kwargs: Дополнительные параметры, специфичные для модели.
+            model_name: Имя модели (например, "imagen-4", "mj-6")
+            prompt: Текстовое описание изображения (1-1000 символов)
+            timeout: Таймаут запроса в секундах
+            **kwargs: Параметры, специфичные для модели
 
         Returns:
-            dict: JSON-ответ от API, содержащий статус и content_id.
+            ImagineResponse: Ответ с content_id и статусом
 
         Raises:
-            ValueError: Если API ключ, промпт или параметры недействительны, или при ошибке API.
+            ChadGPTValidationError: При неверных параметрах
+            ChadGPTAPIError: При ошибке от API
+
+        Example:
+            >>> client = ChadGPTImageClient("your-api-key")
+            >>> response = client.imagine(
+            ...     model_name="imagen-4",
+            ...     prompt="A cat wearing a hat",
+            ...     aspect_ratio="1:1",
+            ...     number_of_images=2
+            ... )
+            >>> print(response.content_id)
         """
+
         payload = self._validate_imagine_params(model_name, prompt, **kwargs)
         url = f"{self.BASE_URL}{model_name}/imagine"
-        return self._send_request(response_type=ImagineResponse, url=url, method="post", payload=payload)
 
-    def check_status(self, content_id: str) -> CheckResponse:
+        response = self._send_request(
+            response_type=ImagineResponse, url=url, method="post", payload=payload, timeout=timeout
+        )
+
+        if response.status == "failed" and response.error_code:
+            logger.error(f"Генерация завершилась с ошибкой: {response.error_code} - {response.error_message}")
+            raise ChadGPTAPIError(response.error_message or "Ошибка генерации изображения", response.error_code)
+
+        logger.info(f"Генерация запущена: content_id={response.content_id}")
+        return response
+
+    def check_status(self, content_id: str, timeout: int | None = None) -> CheckResponse:
         """
-        Проверяет статус генерации изображения по его content_id.
+        Проверяет статус генерации изображения.
 
         Args:
-            content_id (str): ID контента, полученный из ответа imagine.
+            content_id: ID контента из ответа imagine()
+            timeout: Таймаут запроса в секундах
 
         Returns:
-            CheckResponse: JSON-ответ от API, содержащий статус генерации и, при завершении, ссылки на изображения.
+            CheckResponse: Статус генерации и ссылки на изображения
 
         Raises:
-            ValueError: Если API ключ или content_id недействительны, или при ошибке API.
+            ChadGPTValidationError: Если content_id пустой
+            ChadGPTAPIError: При ошибке от API
+
+        Example:
+            >>> status = client.check_status("abc123")
+            >>> if status.status == "completed":
+            ...     for url in status.output:
+            ...         print(f"Изображение: {url}")
+            >>> elif status.status == "pending":
+            ...     print("Генерация в процессе...")
         """
+
         if not isinstance(content_id, str) or not content_id.strip():
-            raise ValueError("Content ID must be a non-empty string.")
+            raise ChadGPTValidationError("Content ID должен быть непустой строкой", "INVALID_CONTENT_ID")
 
         payload = {"api_key": self.api_key, "content_id": content_id}
-        return self._send_request(response_type=CheckResponse, url=self.check_url, method="get", params=payload)
+        response = self._send_request(
+            response_type=CheckResponse, url=self.check_url, method="get", params=payload, timeout=timeout
+        )
+
+        if response.status == "failed" and response.error_code:
+            logger.error(f"Генерация завершилась с ошибкой: {response.error_code} - {response.error_message}")
+            raise ChadGPTAPIError(response.error_message or "Ошибка генерации изображения", response.error_code)
+
+        logger.debug(f"Статус генерации {content_id}: {response.status}")
+        return response

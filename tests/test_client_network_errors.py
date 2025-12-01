@@ -4,12 +4,21 @@ import json
 
 import pytest
 import requests
+
 from pytest_mock import MockerFixture
 
 from pychadgpt.client import (
     ChadGPTBaseClient,
     ChadGPTClient,
     ChadGPTImageClient,
+)
+from pychadgpt.exceptions import (
+    ChadGPTAPIError,
+    ChadGPTConnectionError,
+    ChadGPTError,
+    ChadGPTHTTPError,
+    ChadGPTJSONDecodeError,
+    ChadGPTTimeoutError,
 )
 
 
@@ -25,11 +34,10 @@ class TestNetworkErrors:
             side_effect=requests.exceptions.ConnectionError("Connection refused"),
         )
 
-        result = client.ask("gpt-5", "Hello")
+        with pytest.raises(ChadGPTConnectionError) as exc_info:
+            client.ask("gpt-5", "Hello")
 
-        assert result["is_success"] is False
-        assert result["error_code"] == "CLI-002"
-        assert "Ошибка соединения" in result["error_message"]
+        assert exc_info.value.error_code == "CONNECTION_ERROR"
 
     def test_timeout_error(self, mocker: MockerFixture) -> None:
         """Проверка обработки ошибки таймаута."""
@@ -40,11 +48,10 @@ class TestNetworkErrors:
             side_effect=requests.exceptions.Timeout("Request timeout"),
         )
 
-        result = client.ask("gpt-5", "Hello")
+        with pytest.raises(ChadGPTTimeoutError) as exc_info:
+            client.ask("gpt-5", "Hello")
 
-        assert result["is_success"] is False
-        assert result["error_code"] == "CLI-003"
-        assert "Превышено время ожидания" in result["error_message"]
+        assert exc_info.value.error_code == "TIMEOUT_ERROR"
 
     def test_http_error_with_json_response(self, mocker: MockerFixture) -> None:
         """Проверка обработки HTTP ошибки с JSON ответом."""
@@ -55,17 +62,16 @@ class TestNetworkErrors:
             "error_code": "API-001",
             "error_message": "Invalid API key",
         }
+        mock_response.content = json.dumps(mock_response.json.return_value)
         mock_response.raise_for_status.side_effect = requests.exceptions.HTTPError(
             "400 Bad Request", response=mock_response
         )
         mocker.patch.object(client._session, "request", return_value=mock_response)
 
-        result = client.ask("gpt-5", "Hello")
+        with pytest.raises(ChadGPTAPIError) as exc_info:
+            client.ask("gpt-5", "Hello")
 
-        # Должен вернуться JSON ответ с ошибкой от API
-        assert result["is_success"] is False
-        assert result["error_code"] == "API-001"
-        assert "Invalid API key" in result["error_message"]
+        assert exc_info.value.error_code == "API-001"
 
     def test_http_error_without_json_response(self, mocker: MockerFixture) -> None:
         """Проверка обработки HTTP ошибки без JSON ответа."""
@@ -73,17 +79,16 @@ class TestNetworkErrors:
         mock_response = mocker.Mock()
         mock_response.json.side_effect = json.JSONDecodeError("Invalid JSON", "", 0)
         mock_response.text = "Internal Server Error"
+        mock_response.content = b"Internal Server Error"
         mock_response.raise_for_status.side_effect = requests.exceptions.HTTPError(
             "500 Internal Server Error", response=mock_response
         )
         mocker.patch.object(client._session, "request", return_value=mock_response)
 
-        result = client.ask("gpt-5", "Hello")
+        with pytest.raises(ChadGPTHTTPError) as exc_info:
+            client.ask("gpt-5", "Hello")
 
-        assert result["is_success"] is False
-        assert result["error_code"] == "CLI-001"
-        assert "HTTP-ошибка" in result["error_message"]
-        assert "Internal Server Error" in result["error_message"]
+        assert exc_info.value.error_code == "HTTP_ERROR"
 
     def test_http_error_no_response_object(self, mocker: MockerFixture) -> None:
         """Проверка обработки HTTP ошибки без объекта ответа."""
@@ -101,15 +106,14 @@ class TestNetworkErrors:
         mock_response = mocker.Mock()
         mock_response.json.side_effect = json.JSONDecodeError("Invalid JSON", "", 0)
         mock_response.text = "Not a JSON response"
+        mock_response.content = b"Not a JSON response"
         mock_response.raise_for_status = mocker.Mock()
         mocker.patch.object(client._session, "request", return_value=mock_response)
 
-        result = client.ask("gpt-5", "Hello")
+        with pytest.raises(ChadGPTJSONDecodeError) as exc_info:
+            client.ask("gpt-5", "Hello")
 
-        assert result["is_success"] is False
-        assert result["error_code"] == "CLI-005"
-        assert "Не удалось декодировать JSON" in result["error_message"]
-        assert "Not a JSON response" in result["error_message"]
+        assert exc_info.value.error_code == "JSON_DECODE_ERROR"
 
     def test_generic_request_exception(self, mocker: MockerFixture) -> None:
         """Проверка обработки общей ошибки запроса."""
@@ -120,11 +124,10 @@ class TestNetworkErrors:
             side_effect=requests.exceptions.RequestException("Generic request error"),
         )
 
-        result = client.ask("gpt-5", "Hello")
+        with pytest.raises(ChadGPTError) as exc_info:
+            client.ask("gpt-5", "Hello")
 
-        assert result["is_success"] is False
-        assert result["error_code"] == "CLI-004"
-        assert "Непредвиденная ошибка запроса" in result["error_message"]
+        assert exc_info.value.error_code == "REQUEST_ERROR"
 
 
 class TestBaseClientNetworkErrors:
@@ -139,10 +142,10 @@ class TestBaseClientNetworkErrors:
             side_effect=requests.exceptions.ConnectionError("Connection refused"),
         )
 
-        result = client.get_stat_info()
+        with pytest.raises(ChadGPTConnectionError) as exc_info:
+            client.get_stat_info()
 
-        assert result["is_success"] is False
-        assert result["error_code"] == "CLI-002"
+        assert exc_info.value.error_code == "CONNECTION_ERROR"
 
 
 class TestImageClientNetworkErrors:
@@ -156,10 +159,10 @@ class TestImageClientNetworkErrors:
             "request",
             side_effect=requests.exceptions.ConnectionError("Connection refused"),
         )
+        with pytest.raises(ChadGPTConnectionError) as exc_info:
+            client.imagine("imagen-4", "A beautiful landscape")
 
-        result = client.imagine("imagen-4", "A beautiful landscape")
-
-        assert result.get("status") == "failed" or result.get("error_code") == "CLI-002"
+        assert exc_info.value.error_code == "CONNECTION_ERROR"
 
     def test_check_status_timeout(self, mocker: MockerFixture) -> None:
         """Проверка обработки таймаута в check_status."""
@@ -169,8 +172,7 @@ class TestImageClientNetworkErrors:
             "request",
             side_effect=requests.exceptions.Timeout("Request timeout"),
         )
+        with pytest.raises(ChadGPTTimeoutError) as exc_info:
+            client.check_status("test-content-id")
 
-        result = client.check_status("test-content-id")
-
-        # Результат зависит от реализации, но должен быть в формате CheckResponse
-        assert "error_code" in result or "status" in result
+        assert exc_info.value.error_code == "TIMEOUT_ERROR"

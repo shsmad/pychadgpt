@@ -1,10 +1,22 @@
 """Тесты для валидации параметров генерации изображений."""
 
+import json
 import pytest
 from pydantic import ValidationError
 from pytest_mock import MockerFixture
 
 from pychadgpt.client import ChadGPTImageClient
+
+from pychadgpt.exceptions import (
+    ChadGPTAPIError,
+    ChadGPTConnectionError,
+    ChadGPTError,
+    ChadGPTHTTPError,
+    ChadGPTJSONDecodeError,
+    ChadGPTTimeoutError,
+    ChadGPTValidationError,
+)
+
 
 
 class TestImageParamsValidation:
@@ -15,6 +27,7 @@ class TestImageParamsValidation:
         client = ChadGPTImageClient("test-api-key")
         mock_response = mocker.Mock()
         mock_response.json.return_value = {"status": "starting", "content_id": "test-id"}
+        mock_response.content = json.dumps(mock_response.json.return_value)
         mock_response.raise_for_status = mocker.Mock()
         mock_request = mocker.patch.object(client._session, "request", return_value=mock_response)
 
@@ -25,14 +38,17 @@ class TestImageParamsValidation:
         assert call_args.kwargs["json"]["aspect_ratio"] == "16:9"
 
         # Проверка невалидного aspect_ratio
-        with pytest.raises((ValidationError, ValueError)):
+        with pytest.raises(ChadGPTValidationError) as exc_info:
             client.imagine("imagen-4", "A landscape", aspect_ratio="invalid-ratio")
+
+        assert exc_info.value.error_code == "MODEL_PARAMS_VALIDATION_ERROR"
 
     def test_midjourney_params_validation(self, mocker: MockerFixture) -> None:
         """Проверка валидации параметров для Midjourney."""
         client = ChadGPTImageClient("test-api-key")
         mock_response = mocker.Mock()
         mock_response.json.return_value = {"status": "starting", "content_id": "test-id"}
+        mock_response.content = json.dumps(mock_response.json.return_value)
         mock_response.raise_for_status = mocker.Mock()
         mocker.patch.object(client._session, "request", return_value=mock_response)
 
@@ -47,22 +63,29 @@ class TestImageParamsValidation:
         )
 
         # Проверка невалидного chaos (должен быть 0-100)
-        with pytest.raises((ValidationError, ValueError)):
+        with pytest.raises(ChadGPTValidationError) as exc_info:
             client.imagine("mj-6", "A scene", aspect_ratio="16:9", chaos=150)
 
+        assert exc_info.value.error_code == "MODEL_PARAMS_VALIDATION_ERROR"
+
         # Проверка невалидного seed (должен быть 0-4000000)
-        with pytest.raises((ValidationError, ValueError)):
+        with pytest.raises(ChadGPTValidationError) as exc_info:
             client.imagine("mj-6", "A scene", aspect_ratio="16:9", seed=5000000)
 
+        assert exc_info.value.error_code == "MODEL_PARAMS_VALIDATION_ERROR"
+
         # Проверка невалидного stop (должен быть 10-100)
-        with pytest.raises((ValidationError, ValueError)):
+        with pytest.raises(ChadGPTValidationError) as exc_info:
             client.imagine("mj-6", "A scene", aspect_ratio="16:9", stop=5)
+
+        assert exc_info.value.error_code == "MODEL_PARAMS_VALIDATION_ERROR"
 
     def test_gemini_params_validation(self, mocker: MockerFixture) -> None:
         """Проверка валидации параметров для Gemini."""
         client = ChadGPTImageClient("test-api-key")
         mock_response = mocker.Mock()
         mock_response.json.return_value = {"status": "starting", "content_id": "test-id"}
+        mock_response.content = json.dumps(mock_response.json.return_value)
         mock_response.raise_for_status = mocker.Mock()
         mocker.patch.object(client._session, "request", return_value=mock_response)
 
@@ -75,26 +98,31 @@ class TestImageParamsValidation:
         )
 
         # Проверка превышения лимита image_urls (максимум 5)
-        with pytest.raises((ValidationError, ValueError)):
+        with pytest.raises(ChadGPTValidationError) as exc_info:
             client.imagine(
                 "gemini-2.5-flash-image",
                 "A scene",
                 image_urls=["url1", "url2", "url3", "url4", "url5", "url6"],
             )
 
+        assert exc_info.value.error_code == "MODEL_PARAMS_VALIDATION_ERROR"
+
         # Проверка превышения лимита image_base64s (максимум 5)
-        with pytest.raises((ValidationError, ValueError)):
+        with pytest.raises(ChadGPTValidationError) as exc_info:
             client.imagine(
                 "gemini-2.5-flash-image",
                 "A scene",
                 image_base64s=["b1", "b2", "b3", "b4", "b5", "b6"],
             )
 
+        assert exc_info.value.error_code == "MODEL_PARAMS_VALIDATION_ERROR"
+
     def test_flux_params_validation(self, mocker: MockerFixture) -> None:
         """Проверка валидации параметров для Flux."""
         client = ChadGPTImageClient("test-api-key")
         mock_response = mocker.Mock()
         mock_response.json.return_value = {"status": "starting", "content_id": "test-id"}
+        mock_response.content = json.dumps(mock_response.json.return_value)
         mock_response.raise_for_status = mocker.Mock()
         mocker.patch.object(client._session, "request", return_value=mock_response)
 
@@ -102,24 +130,31 @@ class TestImageParamsValidation:
         client.imagine("flux-1-schnell", "A scene", aspect_ratio="16:9", images=3)
 
         # Проверка невалидного images (должен быть 1-5)
-        with pytest.raises((ValidationError, ValueError)):
+        with pytest.raises(ChadGPTValidationError) as exc_info:
             client.imagine("flux-1-schnell", "A scene", aspect_ratio="16:9", images=0)
 
-        with pytest.raises((ValidationError, ValueError)):
+        assert exc_info.value.error_code == "MODEL_PARAMS_VALIDATION_ERROR"
+
+        with pytest.raises(ChadGPTValidationError) as exc_info:
             client.imagine("flux-1-schnell", "A scene", aspect_ratio="16:9", images=6)
+
+        assert exc_info.value.error_code == "MODEL_PARAMS_VALIDATION_ERROR"
 
         # FluxPro - валидные параметры (все поля обязательны)
         client.imagine("flux-1.1-pro", "A scene", aspect_ratio="16:9", seed=1000, is_raw=True)
 
         # Проверка невалидного seed для FluxPro
-        with pytest.raises((ValidationError, ValueError)):
+        with pytest.raises(ChadGPTValidationError) as exc_info:
             client.imagine("flux-1.1-pro", "A scene", aspect_ratio="16:9", seed=5000000, is_raw=True)
+
+        assert exc_info.value.error_code == "MODEL_PARAMS_VALIDATION_ERROR"
 
     def test_flux_kontext_params_validation(self, mocker: MockerFixture) -> None:
         """Проверка валидации параметров для Flux Kontext."""
         client = ChadGPTImageClient("test-api-key")
         mock_response = mocker.Mock()
         mock_response.json.return_value = {"status": "starting", "content_id": "test-id"}
+        mock_response.content = json.dumps(mock_response.json.return_value)
         mock_response.raise_for_status = mocker.Mock()
         mocker.patch.object(client._session, "request", return_value=mock_response)
 
@@ -137,6 +172,7 @@ class TestImageParamsValidation:
         client = ChadGPTImageClient("test-api-key")
         mock_response = mocker.Mock()
         mock_response.json.return_value = {"status": "starting", "content_id": "test-id"}
+        mock_response.content = json.dumps(mock_response.json.return_value)
         mock_response.raise_for_status = mocker.Mock()
         mocker.patch.object(client._session, "request", return_value=mock_response)
 
@@ -144,14 +180,17 @@ class TestImageParamsValidation:
         client.imagine("gpt-img-high", "A scene", aspect_ratio="16:9")
 
         # Проверка невалидного aspect_ratio
-        with pytest.raises((ValidationError, ValueError)):
+        with pytest.raises(ChadGPTValidationError) as exc_info:
             client.imagine("gpt-img-high", "A scene", aspect_ratio="4:3")
+
+        assert exc_info.value.error_code == "MODEL_PARAMS_VALIDATION_ERROR"
 
     def test_seedream_params_validation(self, mocker: MockerFixture) -> None:
         """Проверка валидации параметров для Seedream."""
         client = ChadGPTImageClient("test-api-key")
         mock_response = mocker.Mock()
         mock_response.json.return_value = {"status": "starting", "content_id": "test-id"}
+        mock_response.content = json.dumps(mock_response.json.return_value)
         mock_response.raise_for_status = mocker.Mock()
         mocker.patch.object(client._session, "request", return_value=mock_response)
 
@@ -165,18 +204,24 @@ class TestImageParamsValidation:
         )
 
         # Проверка невалидного aspect_ratio
-        with pytest.raises((ValidationError, ValueError)):
+        with pytest.raises(ChadGPTValidationError) as exc_info:
             client.imagine("seedream-4", "A scene", aspect_ratio="invalid", size_preset="4K", image_urls=[])
 
+        assert exc_info.value.error_code == "MODEL_PARAMS_VALIDATION_ERROR"
+
         # Проверка невалидного size_preset
-        with pytest.raises((ValidationError, ValueError)):
+        with pytest.raises(ChadGPTValidationError) as exc_info:
             client.imagine("seedream-4", "A scene", aspect_ratio="16:9", size_preset="8K", image_urls=[])
+
+        assert exc_info.value.error_code == "MODEL_PARAMS_VALIDATION_ERROR"
+
 
     def test_seededit_params_validation(self, mocker: MockerFixture) -> None:
         """Проверка валидации параметров для Seededit."""
         client = ChadGPTImageClient("test-api-key")
         mock_response = mocker.Mock()
         mock_response.json.return_value = {"status": "starting", "content_id": "test-id"}
+        mock_response.content = json.dumps(mock_response.json.return_value)
         mock_response.raise_for_status = mocker.Mock()
         mocker.patch.object(client._session, "request", return_value=mock_response)
 
@@ -199,7 +244,7 @@ class TestImageParamsValidation:
         )
 
         # Проверка невалидного guidance_scale (должен быть 1.0-10.0)
-        with pytest.raises((ValidationError, ValueError)):
+        with pytest.raises(ChadGPTValidationError) as exc_info:
             client.imagine(
                 "seededit-3",
                 "Edit this image",
@@ -208,7 +253,9 @@ class TestImageParamsValidation:
                 image_url="https://example.com/image.jpg",
             )
 
-        with pytest.raises((ValidationError, ValueError)):
+        assert exc_info.value.error_code == "MODEL_PARAMS_VALIDATION_ERROR"
+
+        with pytest.raises(ChadGPTValidationError) as exc_info:
             client.imagine(
                 "seededit-3",
                 "Edit this image",
@@ -217,8 +264,10 @@ class TestImageParamsValidation:
                 image_url="https://example.com/image.jpg",
             )
 
+        assert exc_info.value.error_code == "MODEL_PARAMS_VALIDATION_ERROR"
+
         # Проверка невалидного seed
-        with pytest.raises((ValidationError, ValueError)):
+        with pytest.raises(ChadGPTValidationError) as exc_info:
             client.imagine(
                 "seededit-3",
                 "Edit this image",
@@ -227,8 +276,10 @@ class TestImageParamsValidation:
                 image_url="https://example.com/image.jpg",
             )
 
+        assert exc_info.value.error_code == "MODEL_PARAMS_VALIDATION_ERROR"
+
         # Проверка, что нельзя передать оба поля одновременно
-        with pytest.raises((ValidationError, ValueError)):
+        with pytest.raises(ChadGPTValidationError) as exc_info:
             client.imagine(
                 "seededit-3",
                 "Edit this image",
@@ -238,8 +289,10 @@ class TestImageParamsValidation:
                 image_base64="base64string",
             )
 
+        assert exc_info.value.error_code == "MODEL_PARAMS_VALIDATION_ERROR"
+
         # Проверка, что нельзя не передать ни одно из полей
-        with pytest.raises((ValidationError, ValueError)):
+        with pytest.raises(ChadGPTValidationError) as exc_info:
             client.imagine(
                 "seededit-3",
                 "Edit this image",
@@ -247,11 +300,14 @@ class TestImageParamsValidation:
                 guidance_scale=5.0,
             )
 
+        assert exc_info.value.error_code == "MODEL_PARAMS_VALIDATION_ERROR"
+
     def test_generic_params_validation(self, mocker: MockerFixture) -> None:
         """Проверка валидации для моделей с GenericParams."""
         client = ChadGPTImageClient("test-api-key")
         mock_response = mocker.Mock()
         mock_response.json.return_value = {"status": "starting", "content_id": "test-id"}
+        mock_response.content = json.dumps(mock_response.json.return_value)
         mock_response.raise_for_status = mocker.Mock()
         mocker.patch.object(client._session, "request", return_value=mock_response)
 
