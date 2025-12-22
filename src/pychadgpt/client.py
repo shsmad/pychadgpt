@@ -646,7 +646,7 @@ class ChadGPTImageClient(ChadGPTBaseClient):
 
         payload = {"api_key": self.api_key, "content_id": content_id}
         response = self._send_request(
-            response_type=CheckResponse, url=self.check_url, method="get", params=payload, timeout=timeout
+            response_type=CheckResponse, url=self.check_url, method="post", payload=payload, timeout=timeout
         )
 
         if response.status == "failed" and response.error_code:

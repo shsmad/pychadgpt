@@ -11,12 +11,12 @@ class ImagenParams(GenericParams):
 
 
 class MidjourneyParams(GenericParams):
-    aspect_ratio: Literal["1:1", "3:2", "2:3", "16:9", "9:16"]
-    chaos: Annotated[int, Field(ge=0, le=100)]
+    aspect_ratio: Literal["1:1", "3:2", "2:3", "16:9", "9:16"] = "1:1"
+    chaos: Annotated[int, Field(ge=0, le=100)] = 50
     no: str = ""
     quality: str = ""
     seed: Annotated[int, Field(ge=0, le=4000000)] = 0
-    stop: Annotated[int, Field(ge=10, le=100)] = 10
+    stop: Annotated[int, Field(ge=10, le=100)] = 100
     style: str = ""
     stylize: int = 0
     tile: bool = False
@@ -29,37 +29,37 @@ class GeminiParams(GenericParams):
 
 
 class FluxSimpleParams(GenericParams):
-    aspect_ratio: str
-    images: Annotated[int, Field(ge=1, le=5)]
+    aspect_ratio: str = "1:1"
+    images: Annotated[int, Field(ge=1, le=5)] = 1
 
 
 class FluxProParams(GenericParams):
-    aspect_ratio: str
-    seed: Annotated[int, Field(ge=0, le=4000000)]
-    is_raw: bool
+    aspect_ratio: str = "1:1"
+    seed: Annotated[int, Field(ge=0, le=4000000)] = 0
+    # is_raw: bool = False
 
 
 class FluxKontextParams(GenericParams):
-    aspect_ratio: str
-    seed: Annotated[int, Field(ge=0, le=4000000)]
-    image_url: str
+    aspect_ratio: str = "1:1"
+    seed: Annotated[int, Field(ge=0, le=4000000)] = 0
+    image_url: str = ""
 
 
 class DallEParams(GenericParams):
-    aspect_ratio: Literal["1:1", "16:9", "9:16"]
+    aspect_ratio: Literal["1:1", "16:9", "9:16"] = "1:1"
 
 
 class SeedreamParams(GenericParams):
-    aspect_ratio: Literal["1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3", "21:9"]
-    size_preset: Literal["1K", "2K", "4K"]
-    image_urls: Annotated[list[str], Field(max_length=5)]
+    aspect_ratio: Literal["1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3", "21:9"] = "1:1"
+    size_preset: Literal["1K", "2K", "4K"] = "1K"
+    image_urls: Annotated[list[str], Field(max_length=5)] = []
 
 
 class SeededitParams(GenericParams):
-    seed: Annotated[int, Field(ge=0, le=4000000)]
-    guidance_scale: Annotated[float, Field(ge=1.0, le=10.0)]
-    image_url: Optional[str] = None
-    image_base64: Optional[str] = None
+    seed: Annotated[int, Field(ge=0, le=4000000)] = 0
+    guidance_scale: Annotated[float, Field(ge=1.0, le=10.0)] = 1.0
+    image_url: str | None = None
+    image_base64: str | None = None
     # "For 'seededit-3', you must provide either 'image_url' or 'image_base64', but not both."
 
     @model_validator(mode="after")
