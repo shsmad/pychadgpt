@@ -10,6 +10,37 @@ requires-python = ">=3.12"
 readme = "README.md"
 license = {text = "MIT"}
 
+keywords = [
+    "chadgpt",
+    "gpt",
+    "claude",
+    "gemini",
+    "ai",
+    "llm",
+    "openai",
+    "anthropic",
+    "chatbot",
+    "api-client",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/shsmad/pychadgpt"
+Documentation = "https://github.com/shsmad/pychadgpt#readme"
+Repository = "https://github.com/shsmad/pychadgpt"
+Issues = "https://github.com/shsmad/pychadgpt/issues"
+Changelog = "https://github.com/shsmad/pychadgpt/blob/main/CHANGELOG.md"
+
 [build-system]
 requires = ["pdm-backend"]
 build-backend = "pdm.backend"
@@ -126,4 +157,5 @@ dev = [
     "pytest>=8.0.0",
     "pytest-mock>=3.12.0",
     "pytest-cov>=7.0.0",
+    "python-dotenv>=1.2.1",
 ]

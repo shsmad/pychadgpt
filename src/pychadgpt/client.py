@@ -40,6 +40,13 @@ from pychadgpt.models import (
 
 logger = logging.getLogger(__name__)
 
+def _mask_api_key(api_key: str) -> str:
+    """Маскирует API ключ для безопасного логирования."""
+    if not api_key or len(api_key) < 8:
+        return "***"
+    return f"{api_key[:4]}...{api_key[-4:]}"
+
+
 
 def setup_logging(level: int = logging.INFO) -> None:
     """
@@ -104,8 +111,9 @@ class ModelMethodsMeta(type):
                         temperature: float | None = None,
                         max_tokens: int | None = None,
                         images: list[str] | None = None,
+                        timeout: int | None = None,
                     ) -> ChatResponse:
-                        return self.ask(model, message, history, temperature, max_tokens, images)
+                        return self.ask(model, message, history, temperature, max_tokens, images, timeout)
 
                     docstring = f"""
                     Отправляет запрос модели {model}.
@@ -117,6 +125,7 @@ class ModelMethodsMeta(type):
                         temperature: Температура генерации (0-2)
                         max_tokens: Максимальное количество токенов
                         images: Список изображений (URL или base64)
+                        timeout: Таймаут запроса в секундах
 
                     Returns:
                         ChatResponse: Ответ от модели
@@ -233,6 +242,8 @@ class ChadGPTBaseClient:
         request_timeout = timeout if timeout is not None else DEFAULT_TIMEOUT_SECONDS
         response: Response | None = None
 
+        masked_api_key = _mask_api_key(self.api_key)
+
         logger.debug(
             f"Отправка {http_method.value.upper()} запроса к {url} "
             f"(timeout={request_timeout}s, payload_size={len(str(payload)) if payload else 0})"
@@ -265,7 +276,7 @@ class ChadGPTBaseClient:
 
             return cast(TResponse, json_data)
         except requests.exceptions.HTTPError as http_err:
-            logger.error(f"HTTP ошибка: {http_err}")
+            logger.error(f"HTTP ошибка: {http_err} (API key: {masked_api_key})")
             # Попытка парсинга ошибки из ответа API, даже если это HTTP-ошибка
             with contextlib.suppress(json.JSONDecodeError):
                 if response is not None:
@@ -282,11 +293,11 @@ class ChadGPTBaseClient:
             ) from None
 
         except requests.exceptions.ConnectionError as conn_err:
-            logger.error(f"Ошибка соединения: {conn_err}")
+            logger.error(f"Ошибка соединения: {conn_err} (API key: {masked_api_key})")
             raise ChadGPTConnectionError(f"Не удалось подключиться к API: {conn_err}", "CONNECTION_ERROR") from None
 
         except requests.exceptions.Timeout as timeout_err:
-            logger.error(f"Таймаут: {timeout_err}")
+            logger.error(f"Таймаут: {timeout_err} (API key: {masked_api_key})")
             raise ChadGPTTimeoutError(
                 f"Превышено время ожидания ({request_timeout}s): {timeout_err}", "TIMEOUT_ERROR"
             ) from None
