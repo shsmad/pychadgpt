@@ -123,9 +123,9 @@ class TestSuccessfulScenarios:
         # Проверяем, что GET запрос сделан с правильными параметрами
         call_args = mock_request.call_args
         assert call_args is not None
-        assert call_args.kwargs["method"] == "get"
-        assert "api_key" in call_args.kwargs["params"]
-        assert call_args.kwargs["params"]["content_id"] == "test-content-id-123"
+        assert call_args.kwargs["method"] == "post"
+        assert "api_key" in call_args.kwargs["json"]
+        assert call_args.kwargs["json"]["content_id"] == "test-content-id-123"
 
     def test_custom_timeout(self, mocker: MockerFixture) -> None:
         """Проверка использования пользовательского таймаута."""
