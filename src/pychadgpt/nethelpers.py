@@ -182,10 +182,11 @@ def try_parse_error_response(
     if response is None:
         return None
 
-    with contextlib.suppress(json.JSONDecodeError):
+    try:
         return parse_response(logger=logger, response=response, response_type=response_type)
-
-    return None
+    except (json.JSONDecodeError, ValueError, TypeError):
+        # Подавляем ошибки парсинга JSON и валидации Pydantic
+        return None
 
 
 def handle_request_exception(
@@ -251,7 +252,14 @@ def execute_single_request(
     """
     response = session.request(method=http_method.value, **request_kwargs)
     logger.debug(f"Получен ответ: status={response.status_code}, size={len(response.content)} bytes")
-    response.raise_for_status()  # Вызовет HTTPError для статусов 4xx/5xx
+    try:
+        response.raise_for_status()  # Вызовет HTTPError для статусов 4xx/5xx
+    except requests.exceptions.HTTPError as http_err:
+        # Устанавливаем response в исключение, если его там нет
+        # Это важно для последующего парсинга ответа с ошибкой
+        if not hasattr(http_err, "response") or http_err.response is None:
+            http_err.response = response
+        raise
     parsed_response = parse_response(logger=logger, response=response, response_type=response_type)
     return response, parsed_response
 
@@ -303,15 +311,26 @@ def send_request_with_retry(
             last_exception = http_err
             logger.error(f"HTTP ошибка: {http_err} (API key: {masked_api_key})")
 
+            # Получаем response из исключения, если он там есть
+            # requests автоматически устанавливает response в HTTPError при raise_for_status()
+            # Но для надежности также проверяем локальную переменную response
+            error_response = getattr(http_err, "response", None)
+            if error_response is None:
+                # Если response не установлен в исключении, пытаемся получить его из локальной переменной
+                # Это может произойти, если исключение было создано вручную
+                error_response = response
+
             # Пытаемся распарсить ответ как валидный JSON (некоторые API возвращают JSON при ошибках)
-            parsed_error_response = try_parse_error_response(logger=logger, response=response, response_type=response_type)
-            if parsed_error_response is not None:
-                # Type narrowing: после проверки is not None mypy знает, что это TResponse
-                return parsed_error_response
+            # Это важно для API, которые возвращают JSON даже при HTTP ошибках
+            if error_response is not None:
+                parsed_error_response = try_parse_error_response(logger=logger, response=error_response, response_type=response_type)
+                if parsed_error_response is not None:
+                    # Type narrowing: после проверки is not None mypy знает, что это TResponse
+                    return parsed_error_response
 
             # Если не нужно повторять (4xx ошибка), сразу выбрасываем исключение
             if not should_retry(max_retries=max_retries, exception=http_err, attempt=attempt):
-                raise handle_request_exception(http_err, response, response_type, request_timeout) from None
+                raise handle_request_exception(http_err, error_response, response_type, request_timeout) from None
 
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as network_err:
             last_exception = network_err
