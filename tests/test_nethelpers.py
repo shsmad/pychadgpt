@@ -360,6 +360,43 @@ class TestExecuteSingleRequest:
                 response_type=ChatResponse,
             )
 
+    def test_execute_request_sets_response_on_http_error(self, mocker: MockerFixture, requests_mock) -> None:
+        """Проверка, что response устанавливается в HTTPError, если его там нет."""
+        logger = mocker.Mock()
+        session = requests.Session()
+
+        # Создаем response с ошибкой
+        requests_mock.post("https://example.com", status_code=500, text="Internal Server Error")
+        response = requests.post("https://example.com")
+
+        # Мокаем raise_for_status, чтобы он выбрасывал HTTPError без response
+        def mock_raise_for_status():
+            # Создаем HTTPError без response
+            http_err = requests.exceptions.HTTPError("HTTP Error")
+            # Не устанавливаем response, чтобы покрыть строку 261
+            if hasattr(http_err, "response"):
+                delattr(http_err, "response")
+            raise http_err
+
+        # Мокаем response.raise_for_status
+        mocker.patch.object(response, "raise_for_status", side_effect=mock_raise_for_status)
+
+        # Мокаем session.request, чтобы вернуть наш response
+        mocker.patch.object(session, "request", return_value=response)
+
+        with pytest.raises(requests.exceptions.HTTPError) as exc_info:
+            execute_single_request(
+                logger=logger,
+                session=session,
+                http_method=HTTPMethod.POST,
+                request_kwargs={"url": "https://example.com"},
+                response_type=ChatResponse,
+            )
+
+        # Проверяем, что response был установлен в исключении (строка 261)
+        assert hasattr(exc_info.value, "response")
+        assert exc_info.value.response is not None
+        assert exc_info.value.response.status_code == 500
 
 class TestSendRequestWithRetry:
     """Тесты функции send_request_with_retry."""
@@ -551,3 +588,30 @@ class TestSendRequestWithRetry:
 
         # Должна быть только одна попытка
         assert requests_mock.call_count == 1
+
+    def test_all_retries_exhausted_without_last_exception(self, mocker: MockerFixture) -> None:
+        """Проверка обработки случая, когда все попытки исчерпаны без установленного last_exception"""
+        logger = mocker.Mock()
+        session = mocker.Mock()
+
+        def mock_execute(*args, **kwargs):
+            # Выбрасываем KeyboardInterrupt, который не перехватывается блоками except Exception
+            raise KeyboardInterrupt("Interrupted")
+
+        mocker.patch("pychadgpt.nethelpers.execute_single_request", side_effect=mock_execute)
+        mocker.patch("time.sleep")
+
+        with pytest.raises(ChadGPTError) as exc_info:
+            send_request_with_retry(
+                logger=logger,
+                session=session,
+                http_method=HTTPMethod.POST,
+                request_kwargs={"url": "https://example.com"},
+                response_type=ChatResponse,
+                request_timeout=30,
+                masked_api_key="test***key",
+                max_retries=0,  # Цикл не выполнится, last_exception останется None
+            )
+
+        assert exc_info.value.error_code == "REQUEST_ERROR"
+        assert "после 0 попыток" in str(exc_info.value)
