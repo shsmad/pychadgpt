@@ -1,0 +1,4 @@
+# Константы для валидации и обработки
+MAX_PROMPT_LENGTH = 1000
+DEFAULT_TIMEOUT_SECONDS = 30
+DEFAULT_MAX_RETRIES = 3
