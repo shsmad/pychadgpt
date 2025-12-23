@@ -1,7 +1,29 @@
+import re
+
 from enum import Enum
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+def validate_image_format(image: str) -> None:
+    """
+    Валидирует формат изображения (URL или base64 data URL).
+
+    Args:
+        image: Строка с URL или base64 data URL
+
+    Raises:
+        ValueError: Если формат неверный
+    """
+    url_pattern = re.compile(r"^https?://.+")
+    base64_pattern = re.compile(r"^data:image/[^;]+;base64,[A-Za-z0-9+/=]+$")
+
+    if not (url_pattern.match(image) or base64_pattern.match(image)):
+        raise ValueError(
+            f"Неверный формат изображения: '{image[:50]}...'. "
+            "Ожидается URL (http://... или https://...) или base64 data URL (data:image/...;base64,...)"
+        )
 
 # ============================================================================
 # PYDANTIC МОДЕЛИ ДЛЯ ВАЛИДАЦИИ
@@ -32,6 +54,21 @@ class ChatHistoryMessage(BaseModel):
     content: str = Field(..., min_length=1, description="Содержимое сообщения")
     images: list[str] | None = Field(default=None, description="Список URL или base64 Data URL изображений")
 
+    @field_validator("images", mode="before")
+    @classmethod
+    def validate_images(cls, v: Any) -> Any:
+        """Валидирует формат изображений (URL или base64 data URL)."""
+        if v is None:
+            return v
+        if not isinstance(v, list):
+            raise ValueError("images должен быть списком")
+
+        for img in v:
+            if not isinstance(img, str):
+                raise ValueError(f"Элемент images должен быть строкой, получен {type(img).__name__}")
+            validate_image_format(img)
+        return v
+
 
 class AskParameters(BaseModel):
     """
@@ -54,6 +91,22 @@ class AskParameters(BaseModel):
     temperature: float | None = Field(default=None, ge=0.0, le=2.0, description="Температура генерации (0-2)")
     max_tokens: int | None = Field(default=None, gt=0, description="Максимальное количество токенов в ответе")
     images: list[str] | None = Field(default=None, description="Список изображений (URL или base64)")
+
+
+    @field_validator("images", mode="before")
+    @classmethod
+    def validate_images(cls, v: Any) -> Any:
+        """Валидирует формат изображений (URL или base64 data URL)."""
+        if v is None:
+            return v
+        if not isinstance(v, list):
+            raise ValueError("images должен быть списком")
+
+        for img in v:
+            if not isinstance(img, str):
+                raise ValueError(f"Элемент images должен быть строкой, получен {type(img).__name__}")
+            validate_image_format(img)
+        return v
 
 
 
@@ -173,3 +226,7 @@ class HTTPMethod(str, Enum):
 
     GET = "get"
     POST = "post"
+
+# Определяем TypeVar для универсального типа возвращаемого значения.
+# `bound=TypedDict` гарантирует, что T будет TypedDict.
+TResponse = TypeVar("TResponse", bound=BaseModel)
