@@ -7,6 +7,7 @@ from pydantic import ValidationError
 from pychadgpt.models import (
     AskParameters,
     ChatHistoryMessage,
+    ChatResponse,
     ImagineParameters,
     validate_image_format,
 )
@@ -77,6 +78,11 @@ class TestChatHistoryMessage:
         with pytest.raises(ValidationError):
             ChatHistoryMessage(role="user", content="Test", images=[123])  # type: ignore
 
+    def test_images_none(self) -> None:
+        """Проверка, что images может быть None."""
+        msg = ChatHistoryMessage(role="user", content="Test", images=None)
+        assert msg.images is None
+
 
 class TestAskParameters:
     """Тесты для модели AskParameters."""
@@ -146,6 +152,16 @@ class TestAskParameters:
         with pytest.raises(ValidationError):
             AskParameters(message="Hello", images=["invalid-format"])
 
+    def test_images_not_list(self) -> None:
+        """Проверка, что images должен быть списком."""
+        with pytest.raises(ValidationError):
+            AskParameters(message="Hello", images="not-a-list")  # type: ignore
+
+    def test_images_element_not_string(self) -> None:
+        """Проверка, что элементы images должны быть строками."""
+        with pytest.raises(ValidationError):
+            AskParameters(message="Hello", images=[123])  # type: ignore
+
 
 class TestImagineParameters:
     """Тесты для модели ImagineParameters."""
@@ -201,3 +217,29 @@ class TestValidateImageFormat:
         """Проверка URL без протокола."""
         with pytest.raises(ValueError):
             validate_image_format("example.com/image.jpg")
+
+
+class TestChatResponse:
+    """Тесты для модели ChatResponse."""
+
+    def test_valid_success_response(self) -> None:
+        """Проверка валидного успешного ответа."""
+        response = ChatResponse(is_success=True, response="Hello!")
+        assert response.is_success is True
+        assert response.response == "Hello!"
+
+    def test_valid_error_response(self) -> None:
+        """Проверка валидного ответа с ошибкой."""
+        response = ChatResponse(is_success=False, error_code="API-001", error_message="Error")
+        assert response.is_success is False
+        assert response.error_code == "API-001"
+
+    def test_success_without_response(self) -> None:
+        """Проверка, что при is_success=True должно быть поле response."""
+        with pytest.raises(ValueError, match="При is_success=True должно быть заполнено поле response"):
+            ChatResponse(is_success=True, response=None)
+
+    def test_error_without_error_code(self) -> None:
+        """Проверка, что при is_success=False должно быть поле error_code."""
+        with pytest.raises(ValueError, match="При is_success=False должно быть заполнено поле error_code"):
+            ChatResponse(is_success=False, error_code=None)
