@@ -98,6 +98,18 @@ with ChadGPTClient("your-api-key") as client:
     # Сессия автоматически закроется
 ```
 
+### Параметры запроса
+
+```python
+response = client.ask_gpt5(
+    message="Расскажи про Python",
+    temperature=0.7,      # Температура генерации (0-2)
+    max_tokens=1000,      # Максимальное количество токенов
+    timeout=60,           # Таймаут в секундах
+    images=["https://example.com/image.jpg"]  # Изображения
+)
+```
+
 ## Генерация изображений
 
 ```python
@@ -175,6 +187,47 @@ client = ChadGPTClient("your-api-key")
 response = client.ask_gpt5("Привет!")
 ```
 
+## Продвинутое использование
+
+### Кастомный таймаут
+
+```python
+# Глобальный таймаут по умолчанию - 30 секунд
+# Можно переопределить для конкретного запроса
+response = client.ask_gpt5("Привет!", timeout=120)
+```
+
+### Валидация параметров
+
+Библиотека автоматически валидирует все параметры через Pydantic:
+
+```python
+from pychadgpt.models import AskParameters
+
+# Валидация перед отправкой
+params = AskParameters(
+    message="Привет!",
+    temperature=0.7,
+    max_tokens=1000
+)
+```
+
+### Работа с устаревшими моделями
+
+Библиотека предупреждает об использовании устаревших моделей:
+
+```python
+import warnings
+
+# Предупреждение будет показано
+response = client.ask_gpt4o("Привет!")
+
+# Или отключить предупреждения
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", DeprecationWarning)
+    response = client.ask_gpt4o("Привет!")
+```
+
 ## Поддерживаемые модели
 
 ### Chat модели
@@ -194,10 +247,6 @@ response = client.ask_gpt5("Привет!")
 - **Seededit**: seededit-3
 - **Recraft**: recraft-v3-svg
 - **Gemini**: gemini-2.5-flash-image
-
-## Документация
-
-Полная документация доступна в [docs/README.md](docs/README.md)
 
 ## Разработка
 
