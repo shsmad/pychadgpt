@@ -158,4 +158,5 @@ dev = [
     "pytest-mock>=3.12.0",
     "pytest-cov>=7.0.0",
     "python-dotenv>=1.2.1",
+    "requests-mock>=1.12.1",
 ]

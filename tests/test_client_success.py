@@ -5,12 +5,12 @@ import json
 from pytest_mock import MockerFixture
 
 from pychadgpt.client import (
-    DEFAULT_TIMEOUT_SECONDS,
     ChadGPTBaseClient,
     ChadGPTClient,
     ChadGPTImageClient,
     ChatHistoryMessage,
 )
+from pychadgpt.constants import DEFAULT_TIMEOUT_SECONDS
 
 
 class TestSuccessfulScenarios:
