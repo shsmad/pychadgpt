@@ -133,7 +133,6 @@ class TestEdgeCases:
 
     def test_history_validation(self, mocker: MockerFixture) -> None:
         """Проверка валидации истории сообщений."""
-        client = ChadGPTClient("test-api-key")
 
         # Невалидная роль - Pydantic валидирует при создании объекта
         from pydantic import ValidationError

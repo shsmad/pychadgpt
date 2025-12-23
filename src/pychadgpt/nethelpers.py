@@ -1,4 +1,3 @@
-import contextlib
 import json
 import time
 
@@ -323,7 +322,9 @@ def send_request_with_retry(
             # Пытаемся распарсить ответ как валидный JSON (некоторые API возвращают JSON при ошибках)
             # Это важно для API, которые возвращают JSON даже при HTTP ошибках
             if error_response is not None:
-                parsed_error_response = try_parse_error_response(logger=logger, response=error_response, response_type=response_type)
+                parsed_error_response = try_parse_error_response(
+                    logger=logger, response=error_response, response_type=response_type
+                )
                 if parsed_error_response is not None:
                     # Type narrowing: после проверки is not None mypy знает, что это TResponse
                     return parsed_error_response

@@ -210,12 +210,12 @@ class TestValidateImageFormat:
 
     def test_invalid_base64_format(self) -> None:
         """Проверка невалидного base64 формата."""
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError):  # noqa: PT011
             validate_image_format("data:image/png;base64,invalid-base64!")
 
     def test_missing_protocol(self) -> None:
         """Проверка URL без протокола."""
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError):  # noqa: PT011
             validate_image_format("example.com/image.jpg")
 
 
